@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Yapo Teya Translator</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="app-header">
+      <div class="identity">
+        <div class="mark" aria-hidden="true">YT</div>
+        <div>
+          <h1>Yapo Teya Translator</h1>
+          <p>Grammar-aware translation in both directions.</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <div class="dictionary-count" id="dictionaryCount">Loading dictionary…</div>
+        <button class="button button-quiet" id="dictionaryButton" type="button">Dictionary</button>
+        <button class="button button-quiet" id="clearButton" type="button">Clear</button>
+        <button class="button button-primary" id="translateButton" type="button">Translate</button>
+      </div>
+    </header>
+
+    <section class="direction-toolbar" aria-label="Translation direction">
+      <span class="direction-label">Translate from</span>
+      <div class="direction-switch" role="group" aria-label="Choose translation direction">
+        <button class="direction-button active" id="directionYapo" type="button" aria-pressed="true">Yapo Teya → English</button>
+        <button class="direction-button" id="directionEnglish" type="button" aria-pressed="false">English → Yapo Teya</button>
+      </div>
+      <span class="direction-note" id="directionNote">Write only in the Yapo Teya panel.</span>
+    </section>
+
+    <section class="translator" aria-label="Translator">
+      <article class="language-panel" id="yapoPanel">
+        <div class="panel-header">
+          <div>
+            <div class="eyebrow">Constructed language</div>
+            <h2>Yapo Teya</h2>
+          </div>
+          <button class="copy-button" data-copy="yapoInput" type="button" aria-label="Copy Yapo Teya text">Copy</button>
+        </div>
+        <div class="text-stack">
+          <div class="highlight-layer" id="yapoHighlights" aria-hidden="true"></div>
+          <textarea
+            id="yapoInput"
+            spellcheck="false"
+            autocomplete="off"
+            placeholder="Su yapi lon tomo…"
+            aria-label="Yapo Teya text"
+          ></textarea>
+        </div>
+        <div class="panel-footer">
+          <span>Hover to highlight · right-click for translations</span>
+          <span id="yapoCount">0 characters</span>
+        </div>
+      </article>
+
+      <div class="direction-indicator" aria-hidden="true">
+        <span>⇄</span>
+      </div>
+
+      <article class="language-panel" id="englishPanel">
+        <div class="panel-header">
+          <div>
+            <div class="eyebrow">Translation</div>
+            <h2>English</h2>
+          </div>
+          <button class="copy-button" data-copy="englishInput" type="button" aria-label="Copy English text">Copy</button>
+        </div>
+        <div class="text-stack">
+          <div class="highlight-layer" id="englishHighlights" aria-hidden="true"></div>
+          <textarea
+            id="englishInput"
+            readonly
+            spellcheck="true"
+            autocomplete="off"
+            placeholder="I speak in the house…"
+            aria-label="English text"
+          ></textarea>
+        </div>
+        <div class="panel-footer">
+          <span>Hover to highlight · right-click for translations</span>
+          <span id="englishCount">0 characters</span>
+        </div>
+      </article>
+    </section>
+
+    <footer class="status-bar">
+      <div class="status-dot" id="statusDot"></div>
+      <div id="statusText">Ready</div>
+      <div class="shortcut">Ctrl + Enter to translate · Ctrl + L to clear</div>
+    </footer>
+  </main>
+
+  <div class="word-popover" id="wordPopover" hidden>
+    <div class="popover-heading">
+      <div>
+        <div class="eyebrow">Choose for this occurrence</div>
+        <strong id="popoverWord"></strong>
+        <div class="popover-origin" id="popoverOrigin"></div>
+      </div>
+      <button class="icon-button" id="closePopover" type="button" aria-label="Close">×</button>
+    </div>
+    <div class="option-list" id="optionList"></div>
+    <button class="phrase-option" id="phraseActionButton" type="button" hidden></button>
+    <button class="add-option" id="addTranslationButton" type="button"><span>＋</span> Add translation</button>
+  </div>
+
+  <dialog class="add-dialog" id="addDialog">
+    <form id="addTranslationForm">
+      <div class="dialog-header">
+        <div>
+          <div class="eyebrow">Personal dictionary</div>
+          <h2 id="translationDialogTitle">Add translation</h2>
+        </div>
+        <button class="icon-button" id="closeDialog" type="button" aria-label="Close">×</button>
+      </div>
+
+      <label class="field">
+        <span id="sourceFieldLabel">Yapo Teya word</span>
+        <input id="sourceWord" name="sourceWord" required autocomplete="off">
+      </label>
+      <label class="field">
+        <span id="translationFieldLabel">English translation</span>
+        <input id="translationWord" name="translationWord" required autocomplete="off">
+      </label>
+      <div class="root-suggestions" id="rootSuggestions" hidden>
+        <div class="root-suggestions-title">Matching roots</div>
+        <div class="root-suggestions-list" id="rootSuggestionsList"></div>
+      </div>
+      <div class="root-suggestions" id="dictionarySuggestions" hidden>
+        <div class="root-suggestions-title">Matching dictionary entries</div>
+        <div class="root-suggestions-list" id="dictionarySuggestionsList"></div>
+      </div>
+      <label class="field">
+        <span>Word type</span>
+        <select id="wordCategory" name="wordCategory" required>
+          <option value="basic">Basic / grammar word</option>
+          <option value="n">Noun</option>
+          <option value="adj">Adjective</option>
+          <option value="v">Verb</option>
+          <option value="adv">Adverb</option>
+          <option value="ph">Phrase</option>
+          <option value="pn">Pronoun</option>
+          <option value="num">Numeral</option>
+          <option value="prep">Preposition</option>
+        </select>
+      </label>
+
+      <p class="save-note" id="saveNote">Saved translations remain available in this browser.</p>
+      <div class="dialog-actions">
+        <button class="button button-quiet" id="cancelAdd" type="button">Cancel</button>
+        <button class="button button-primary" id="saveTranslationButton" type="submit">Save translation</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="add-dialog dictionary-dialog" id="dictionaryDialog">
+    <div class="dialog-header">
+      <div>
+        <div class="eyebrow">Yapo Teya</div>
+        <h2>Dictionary</h2>
+      </div>
+      <div class="dictionary-header-actions">
+        <button class="button button-primary" id="dictionaryAddButton" type="button">＋ Add word</button>
+        <button class="icon-button" id="closeDictionary" type="button" aria-label="Close">×</button>
+      </div>
+    </div>
+    <div class="dictionary-tabs" role="tablist" aria-label="Dictionary section">
+      <button class="dictionary-tab active" id="customDictionaryTab" type="button" role="tab" aria-selected="true">Added terms</button>
+      <button class="dictionary-tab" id="allDictionaryTab" type="button" role="tab" aria-selected="false">All dictionary words</button>
+    </div>
+    <div class="dictionary-direction" aria-label="Dictionary search direction">
+      <span class="dictionary-direction-label">Search direction</span>
+      <button class="dictionary-flip" id="dictionaryFlip" type="button" title="Reverse dictionary direction">
+        <span id="dictionaryFrom">Yapo Teya</span>
+        <span class="dictionary-flip-icon" aria-hidden="true">⇄</span>
+        <span id="dictionaryTo">English</span>
+      </button>
+    </div>
+    <input class="dictionary-search" id="dictionarySearch" type="search" placeholder="Search added terms…" aria-label="Search added terms">
+    <section class="dictionary-details" id="dictionaryDetails" hidden>
+      <div class="dictionary-details-header">
+        <div>
+          <div class="eyebrow">Word details</div>
+          <h3 id="dictionaryDetailsWord"></h3>
+        </div>
+        <button class="icon-button" id="closeDictionaryDetails" type="button" aria-label="Close details">×</button>
+      </div>
+      <div class="dictionary-details-grid" id="dictionaryDetailsGrid"></div>
+    </section>
+    <div class="custom-dictionary-list" id="customDictionaryList"></div>
+  </dialog>
+
+  <script src="dictionary-data.js?v=20260914-5"></script>
+  <script src="grammar.js?v=20260914-5"></script>
+  <script src="app.js?v=20260914-5"></script>
+</body>
+</html>
