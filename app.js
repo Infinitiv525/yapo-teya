@@ -1192,7 +1192,6 @@ function updateAddSuggestions() {
 }
 
 async function saveTranslation(event) {
-async function saveTranslation(event) {
   event.preventDefault();
 
   const fromYapo = addEntryFromYapo;
