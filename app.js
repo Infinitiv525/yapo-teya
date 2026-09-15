@@ -130,6 +130,11 @@ function storePreference(side, source, target, category = "") {
   const preferences = loadPreferences();
   preferences[side][preferenceStorageKey(source, category)] = target;
   localStorage.setItem(PREFERENCE_STORAGE_KEY, JSON.stringify(preferences));
+  let translator = new window.YapoGrammar.GrammarTranslator(
+  window.YAPO_DICTIONARIES,
+  combinedCustomEntries(),
+  loadPreferences(),
+);
 }
 
 function areaFor(side) { return side === "yapo" ? yapoInput : englishInput; }
