@@ -1,7 +1,8 @@
 "use strict";
-
 const CUSTOM_STORAGE_KEY = "yapo-teya-custom-translations-v1";
 const PREFERENCE_STORAGE_KEY = "yapo-teya-preferred-translations-v1";
+const EDIT_STORAGE_KEY = "yapo-teya-dictionary-edits-v1";
+const DELETE_STORAGE_KEY = "yapo-teya-dictionary-deletions-v1";
 const CLICK_WORD_RE = /[\p{L}\p{N}]+(?:['’\-][\p{L}\p{N}]+)*/gu;
 const CATEGORY_LABELS = {
   basic: "basic", n: "noun", adj: "adjective", v: "verb", adv: "adverb",
@@ -102,6 +103,204 @@ function removeLocalEntry(entry) {
   localStorage.setItem(CUSTOM_STORAGE_KEY, JSON.stringify(entries));
 }
 
+function entryKey(entry) {
+  return [
+    String(entry.category || ""),
+    String(entry.yapo || "").trim().toLocaleLowerCase(),
+    String(entry.english || "").trim().toLocaleLowerCase(),
+  ].join("\u0001");
+}
+
+function loadLocalEdits() {
+  const edits = loadJson(EDIT_STORAGE_KEY, []);
+  return Array.isArray(edits) ? edits : [];
+}
+
+function storeLocalEdit(original, replacement) {
+  const edits = loadLocalEdits();
+  const originalKey = entryKey(original);
+
+  const existingIndex = edits.findIndex((edit) =>
+    entryKey(edit.original) === originalKey
+    || entryKey(edit.replacement) === originalKey
+  );
+
+  const record = {
+    original: { ...original },
+    replacement: { ...replacement },
+  };
+
+  if (existingIndex >= 0) {
+    // Keep the true original entry so repeated edits still override
+    // the same published dictionary entry.
+    record.original = edits[existingIndex].original;
+    edits[existingIndex] = record;
+  } else {
+    edits.push(record);
+  }
+
+  localStorage.setItem(EDIT_STORAGE_KEY, JSON.stringify(edits));
+}
+
+function loadLocalDeletions() {
+  const deletions = loadJson(DELETE_STORAGE_KEY, []);
+  return Array.isArray(deletions) ? deletions : [];
+}
+
+function storeLocalDeletion(entry) {
+  const deletions = loadLocalDeletions();
+  const key = entryKey(entry);
+
+  if (!deletions.some((existing) => entryKey(existing) === key)) {
+    deletions.push({ ...entry });
+  }
+
+  localStorage.setItem(DELETE_STORAGE_KEY, JSON.stringify(deletions));
+}
+
+function removeLocalDeletion(entry) {
+  const key = entryKey(entry);
+  const deletions = loadLocalDeletions()
+    .filter((existing) => entryKey(existing) !== key);
+
+  localStorage.setItem(DELETE_STORAGE_KEY, JSON.stringify(deletions));
+}
+
+function baseDictionaryEntries() {
+  return Object.entries(window.YAPO_DICTIONARIES || {})
+    .filter(([category]) => category !== "root")
+    .flatMap(([category, dictionary]) =>
+      Object.entries(dictionary).flatMap(([yapo, meanings]) =>
+        meanings.map((english) => ({ category, yapo, english }))
+      )
+    );
+}
+
+function isPublishedEntry(entry) {
+  const key = entryKey(entry);
+
+  return baseDictionaryEntries().some((candidate) =>
+    entryKey(candidate) === key
+  ) || (window.YAPO_CUSTOM_ENTRIES || []).some((candidate) =>
+    entryKey(candidate) === key
+  );
+}
+
+function effectiveCustomEntries() {
+  const publishedCustom = window.YAPO_CUSTOM_ENTRIES || [];
+  const localCustom = loadLocalEntries();
+  const edits = loadLocalEdits();
+  const deletions = loadLocalDeletions();
+
+  const deletedKeys = new Set(deletions.map(entryKey));
+  const editedOriginalKeys = new Set(edits.map((edit) => entryKey(edit.original)));
+
+  const entries = [];
+
+  for (const entry of [...publishedCustom, ...localCustom]) {
+    const key = entryKey(entry);
+
+    if (deletedKeys.has(key) || editedOriginalKeys.has(key)) {
+      continue;
+    }
+
+    if (!entries.some((existing) => entryKey(existing) === key)) {
+      entries.push(entry);
+    }
+  }
+
+  for (const edit of edits) {
+    const replacementKey = entryKey(edit.replacement);
+
+    if (
+      !deletedKeys.has(replacementKey)
+      && !entries.some((existing) => entryKey(existing) === replacementKey)
+    ) {
+      entries.push(edit.replacement);
+    }
+  }
+
+  return entries;
+}
+
+function buildEffectiveDictionaries() {
+  const dictionaries = {};
+
+  for (const [category, dictionary] of Object.entries(window.YAPO_DICTIONARIES || {})) {
+    dictionaries[category] = {};
+
+    for (const [yapo, meanings] of Object.entries(dictionary || {})) {
+      dictionaries[category][yapo] = [...meanings];
+    }
+  }
+
+  const edits = loadLocalEdits();
+  const deletions = loadLocalDeletions();
+
+  function removeEntry(entry) {
+    const dictionary = dictionaries[entry.category];
+    if (!dictionary) return;
+
+    const storedWord = Object.keys(dictionary).find(
+      (word) => word.toLocaleLowerCase() === entry.yapo.toLocaleLowerCase()
+    );
+
+    if (!storedWord) return;
+
+    dictionary[storedWord] = dictionary[storedWord].filter(
+      (meaning) =>
+        meaning.toLocaleLowerCase() !== entry.english.toLocaleLowerCase()
+    );
+
+    if (!dictionary[storedWord].length) {
+      delete dictionary[storedWord];
+    }
+  }
+
+  function addEntry(entry) {
+    if (!dictionaries[entry.category]) {
+      dictionaries[entry.category] = {};
+    }
+
+    const dictionary = dictionaries[entry.category];
+
+    const storedWord = Object.keys(dictionary).find(
+      (word) => word.toLocaleLowerCase() === entry.yapo.toLocaleLowerCase()
+    );
+
+    const word = storedWord || entry.yapo;
+    const meanings = dictionary[word] || (dictionary[word] = []);
+
+    if (!meanings.some(
+      (meaning) =>
+        meaning.toLocaleLowerCase() === entry.english.toLocaleLowerCase()
+    )) {
+      meanings.push(entry.english);
+    }
+  }
+
+  for (const edit of edits) {
+    removeEntry(edit.original);
+    addEntry(edit.replacement);
+  }
+
+  for (const deletion of deletions) {
+    removeEntry(deletion);
+  }
+
+  return dictionaries;
+}
+
+function rebuildTranslator() {
+  translator = new window.YapoGrammar.GrammarTranslator(
+    buildEffectiveDictionaries(),
+    effectiveCustomEntries(),
+    loadPreferences(),
+  );
+
+  updateCounts();
+}
+
 function combinedCustomEntries(serverEntries = window.YAPO_CUSTOM_ENTRIES || []) {
   const combined = [];
   for (const entry of [...serverEntries, ...loadLocalEntries()]) {
@@ -130,15 +329,6 @@ function storePreference(side, source, target, category = "") {
   const preferences = loadPreferences();
   preferences[side][preferenceStorageKey(source, category)] = target;
   localStorage.setItem(PREFERENCE_STORAGE_KEY, JSON.stringify(preferences));
-  if (["http:", "https:"].includes(location.protocol)) {
-    fetch("/api/preferences", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ side, source, target, category }),
-    }).then((response) => response.json()).then((payload) => {
-      if (payload?.preferences) window.YAPO_PREFERENCES = payload.preferences;
-    }).catch(() => {});
-  }
 }
 
 if (!window.YAPO_DICTIONARIES || !window.YapoGrammar) {
@@ -146,8 +336,8 @@ if (!window.YAPO_DICTIONARIES || !window.YapoGrammar) {
 }
 
 let translator = new window.YapoGrammar.GrammarTranslator(
-  window.YAPO_DICTIONARIES,
-  combinedCustomEntries(),
+  buildEffectiveDictionaries(),
+  effectiveCustomEntries(),
   loadPreferences(),
 );
 
@@ -1002,48 +1192,63 @@ function updateAddSuggestions() {
 }
 
 async function saveTranslation(event) {
+async function saveTranslation(event) {
   event.preventDefault();
+
   const fromYapo = addEntryFromYapo;
+
   const entry = {
     category: wordCategory.value,
     yapo: (fromYapo ? sourceWord.value : translationWord.value).trim(),
     english: (fromYapo ? translationWord.value : sourceWord.value).trim(),
   };
+
   if (!entry.yapo || !entry.english) return;
+
   saveNote.textContent = "Saving…";
+
   try {
-    let storedOnDisk = false;
-    if (["http:", "https:"].includes(location.protocol)) {
-      const response = await fetch("/api/translations", {
-        method: editingEntry ? "PUT" : "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(editingEntry ? { original: editingEntry, replacement: entry } : entry),
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok || !payload.ok) throw new Error(payload.error || `HTTP ${response.status}`);
-      if (payload.dictionaries) {
-        window.YAPO_DICTIONARIES = payload.dictionaries;
-        window.YAPO_CUSTOM_ENTRIES = payload.customEntries || [];
-        translator = new window.YapoGrammar.GrammarTranslator(
-          payload.dictionaries,
-          combinedCustomEntries(payload.customEntries || []),
-          loadPreferences(),
-        );
+    if (editingEntry) {
+      const oldEntry = { ...editingEntry };
+
+      // Was this something the visitor added themselves?
+      const localEntries = loadLocalEntries();
+      const wasLocal = localEntries.some(
+        (candidate) => entryKey(candidate) === entryKey(oldEntry)
+      );
+
+      if (wasLocal) {
+        removeLocalEntry(oldEntry);
+        storeLocalEntry(entry);
+      } else {
+        // This is an original/published dictionary entry.
+        // Keep the published data untouched and save an override locally.
+        storeLocalEdit(oldEntry, entry);
       }
-      storedOnDisk = true;
-    }
-    if (!editingEntry || !storedOnDisk) {
-      if (editingEntry) removeLocalEntry(editingEntry);
-      translator.addCustom(entry);
+
+      // If the entry had previously been locally deleted, restore it.
+      removeLocalDeletion(oldEntry);
+      removeLocalDeletion(entry);
+    } else {
       storeLocalEntry(entry);
+      removeLocalDeletion(entry);
     }
+
+    rebuildTranslator();
+
     addDialog.close();
     translateSelectedDirection();
+
     statusText.textContent = editingEntry
-      ? `Updated “${entry.yapo}” → “${entry.english}”`
-      : (storedOnDisk ? `Saved “${entry.yapo}” in the personal dictionary file` : `Saved “${entry.yapo}” in this browser`);
+      ? `Updated “${entry.yapo}” → “${entry.english}” in this browser`
+      : `Saved “${entry.yapo}” in this browser`;
+
     editingEntry = null;
     statusDot.classList.remove("warning");
+
+    if (dictionaryDialog.open) {
+      renderCustomDictionary();
+    }
   } catch (error) {
     saveNote.textContent = `Could not save: ${error.message}`;
     statusDot.classList.add("warning");
@@ -1051,35 +1256,42 @@ async function saveTranslation(event) {
 }
 
 async function deleteTranslation(entry) {
-  if (!window.confirm(`Delete “${entry.yapo}” → “${entry.english}”?`)) return false;
+  if (!window.confirm(`Delete “${entry.yapo}” → “${entry.english}” from this browser?`)) {
+    return false;
+  }
+
   try {
-    if (["http:", "https:"].includes(location.protocol)) {
-      const response = await fetch("/api/translations", {
-        method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify(entry),
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok || !payload.ok) throw new Error(payload.error || `HTTP ${response.status}`);
-      window.YAPO_DICTIONARIES = payload.dictionaries;
-      window.YAPO_CUSTOM_ENTRIES = payload.customEntries;
+    const localEntries = loadLocalEntries();
+    const wasLocal = localEntries.some(
+      (candidate) => entryKey(candidate) === entryKey(entry)
+    );
+
+    if (wasLocal) {
       removeLocalEntry(entry);
-      translator = new window.YapoGrammar.GrammarTranslator(
-        payload.dictionaries,
-        combinedCustomEntries(payload.customEntries),
-        loadPreferences(),
-      );
     } else {
-      removeLocalEntry(entry);
-      translator.removeCustom(entry);
+      storeLocalDeletion(entry);
     }
+
+    rebuildTranslator();
+
     currentSelection = null;
     closePopover();
     translateSelectedDirection();
-    statusText.textContent = `Deleted “${entry.yapo}” → “${entry.english}”`;
+
+    statusText.textContent =
+      `Deleted “${entry.yapo}” → “${entry.english}” from this browser`;
+
     statusDot.classList.remove("warning");
-    if (dictionaryDialog.open) renderCustomDictionary();
+
+    if (dictionaryDialog.open) {
+      renderCustomDictionary();
+    }
+
     return true;
   } catch (error) {
-    statusText.textContent = `Could not delete translation: ${error.message}`;
+    statusText.textContent =
+      `Could not delete translation: ${error.message}`;
+
     statusDot.classList.add("warning");
     return false;
   }
@@ -1087,10 +1299,17 @@ async function deleteTranslation(entry) {
 
 function renderCustomDictionary() {
   const query = dictionarySearch.value.trim().toLocaleLowerCase();
-  const entries = dictionaryMode === "custom"
-    ? combinedCustomEntries()
-    : Object.entries(window.YAPO_DICTIONARIES).filter(([category]) => category !== "root").flatMap(([category, dictionary]) =>
-      Object.entries(dictionary).flatMap(([yapo, meanings]) => meanings.map((english) => ({ category, yapo, english }))));
+  const effectiveDictionaries = buildEffectiveDictionaries();
+
+const entries = dictionaryMode === "custom"
+  ? effectiveCustomEntries()
+  : Object.entries(effectiveDictionaries)
+      .filter(([category]) => category !== "root")
+      .flatMap(([category, dictionary]) =>
+        Object.entries(dictionary).flatMap(([yapo, meanings]) =>
+          meanings.map((english) => ({ category, yapo, english }))
+        )
+      );
   const filteredEntries = entries.filter((entry) => !query
     || entry[dictionaryDirection].toLocaleLowerCase().includes(query));
   customDictionaryList.replaceChildren();
@@ -1134,14 +1353,13 @@ function renderCustomDictionary() {
     editButton.title = "Edit this dictionary entry";
     editButton.addEventListener("click", () => openDictionaryEditDialog(entry));
     action.append(category, editButton);
-    if (translator.isCustom(entry.category, entry.yapo, entry.english)) {
-      const deleteButton = document.createElement("button");
-      deleteButton.type = "button";
-      deleteButton.className = "delete-option";
-      deleteButton.textContent = "Delete";
-      deleteButton.addEventListener("click", () => deleteTranslation(entry));
-      action.append(deleteButton);
-    }
+    const deleteButton = document.createElement("button");
+deleteButton.type = "button";
+deleteButton.className = "delete-option";
+deleteButton.textContent = "Delete";
+deleteButton.title = "Hide this entry in this browser";
+deleteButton.addEventListener("click", () => deleteTranslation(entry));
+action.append(deleteButton);
     row.append(source, arrow, target, action);
     customDictionaryList.append(row);
   }
