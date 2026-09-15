@@ -130,26 +130,7 @@ function storePreference(side, source, target, category = "") {
   const preferences = loadPreferences();
   preferences[side][preferenceStorageKey(source, category)] = target;
   localStorage.setItem(PREFERENCE_STORAGE_KEY, JSON.stringify(preferences));
-  if (["http:", "https:"].includes(location.protocol)) {
-    fetch("/api/preferences", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ side, source, target, category }),
-    }).then((response) => response.json()).then((payload) => {
-      if (payload?.preferences) window.YAPO_PREFERENCES = payload.preferences;
-    }).catch(() => {});
-  }
 }
-
-if (!window.YAPO_DICTIONARIES || !window.YapoGrammar) {
-  throw new Error("Translator data is missing. Run read_dic.py and reload the page.");
-}
-
-let translator = new window.YapoGrammar.GrammarTranslator(
-  window.YAPO_DICTIONARIES,
-  combinedCustomEntries(),
-  loadPreferences(),
-);
 
 function areaFor(side) { return side === "yapo" ? yapoInput : englishInput; }
 function highlightLayerFor(side) { return side === "yapo" ? yapoHighlights : englishHighlights; }
@@ -1003,47 +984,41 @@ function updateAddSuggestions() {
 
 async function saveTranslation(event) {
   event.preventDefault();
+
   const fromYapo = addEntryFromYapo;
+
   const entry = {
     category: wordCategory.value,
     yapo: (fromYapo ? sourceWord.value : translationWord.value).trim(),
     english: (fromYapo ? translationWord.value : sourceWord.value).trim(),
   };
+
   if (!entry.yapo || !entry.english) return;
+
   saveNote.textContent = "Saving…";
+
   try {
-    let storedOnDisk = false;
-    if (["http:", "https:"].includes(location.protocol)) {
-      const response = await fetch("/api/translations", {
-        method: editingEntry ? "PUT" : "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(editingEntry ? { original: editingEntry, replacement: entry } : entry),
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok || !payload.ok) throw new Error(payload.error || `HTTP ${response.status}`);
-      if (payload.dictionaries) {
-        window.YAPO_DICTIONARIES = payload.dictionaries;
-        window.YAPO_CUSTOM_ENTRIES = payload.customEntries || [];
-        translator = new window.YapoGrammar.GrammarTranslator(
-          payload.dictionaries,
-          combinedCustomEntries(payload.customEntries || []),
-          loadPreferences(),
-        );
-      }
-      storedOnDisk = true;
+    if (editingEntry) {
+      removeLocalEntry(editingEntry);
+      translator.removeCustom(editingEntry);
     }
-    if (!editingEntry || !storedOnDisk) {
-      if (editingEntry) removeLocalEntry(editingEntry);
-      translator.addCustom(entry);
-      storeLocalEntry(entry);
-    }
+
+    translator.addCustom(entry);
+    storeLocalEntry(entry);
+
     addDialog.close();
     translateSelectedDirection();
+
     statusText.textContent = editingEntry
-      ? `Updated “${entry.yapo}” → “${entry.english}”`
-      : (storedOnDisk ? `Saved “${entry.yapo}” in the personal dictionary file` : `Saved “${entry.yapo}” in this browser`);
+      ? `Updated “${entry.yapo}” → “${entry.english}” in this browser`
+      : `Saved “${entry.yapo}” in this browser`;
+
     editingEntry = null;
     statusDot.classList.remove("warning");
+
+    if (dictionaryDialog.open) {
+      renderCustomDictionary();
+    }
   } catch (error) {
     saveNote.textContent = `Could not save: ${error.message}`;
     statusDot.classList.add("warning");
@@ -1051,35 +1026,32 @@ async function saveTranslation(event) {
 }
 
 async function deleteTranslation(entry) {
-  if (!window.confirm(`Delete “${entry.yapo}” → “${entry.english}”?`)) return false;
+  if (!window.confirm(`Delete “${entry.yapo}” → “${entry.english}”?`)) {
+    return false;
+  }
+
   try {
-    if (["http:", "https:"].includes(location.protocol)) {
-      const response = await fetch("/api/translations", {
-        method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify(entry),
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok || !payload.ok) throw new Error(payload.error || `HTTP ${response.status}`);
-      window.YAPO_DICTIONARIES = payload.dictionaries;
-      window.YAPO_CUSTOM_ENTRIES = payload.customEntries;
-      removeLocalEntry(entry);
-      translator = new window.YapoGrammar.GrammarTranslator(
-        payload.dictionaries,
-        combinedCustomEntries(payload.customEntries),
-        loadPreferences(),
-      );
-    } else {
-      removeLocalEntry(entry);
-      translator.removeCustom(entry);
-    }
+    removeLocalEntry(entry);
+    translator.removeCustom(entry);
+
     currentSelection = null;
     closePopover();
     translateSelectedDirection();
-    statusText.textContent = `Deleted “${entry.yapo}” → “${entry.english}”`;
+
+    statusText.textContent =
+      `Deleted “${entry.yapo}” → “${entry.english}” from this browser`;
+
     statusDot.classList.remove("warning");
-    if (dictionaryDialog.open) renderCustomDictionary();
+
+    if (dictionaryDialog.open) {
+      renderCustomDictionary();
+    }
+
     return true;
   } catch (error) {
-    statusText.textContent = `Could not delete translation: ${error.message}`;
+    statusText.textContent =
+      `Could not delete translation: ${error.message}`;
+
     statusDot.classList.add("warning");
     return false;
   }
