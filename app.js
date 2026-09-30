@@ -2,6 +2,7 @@
 
 const CUSTOM_STORAGE_KEY = "yapo-teya-custom-translations-v1";
 const PREFERENCE_STORAGE_KEY = "yapo-teya-preferred-translations-v1";
+const EDIT_STORAGE_KEY = "yapo-teya-dictionary-edits-v1";
 const CLICK_WORD_RE = /[\p{L}\p{N}]+(?:['’\-][\p{L}\p{N}]+)*/gu;
 const CATEGORY_LABELS = {
   basic: "basic", n: "noun", adj: "adjective", v: "verb", adv: "adverb",
@@ -102,14 +103,49 @@ function removeLocalEntry(entry) {
   localStorage.setItem(CUSTOM_STORAGE_KEY, JSON.stringify(entries));
 }
 
-function combinedCustomEntries(serverEntries = window.YAPO_CUSTOM_ENTRIES || []) {
-  const combined = [];
-  for (const entry of [...serverEntries, ...loadLocalEntries()]) {
-    if (!combined.some((existing) => existing.category === entry.category
-      && String(existing.yapo).toLocaleLowerCase() === String(entry.yapo).toLocaleLowerCase()
-      && String(existing.english).toLocaleLowerCase() === String(entry.english).toLocaleLowerCase())) combined.push(entry);
+function combinedCustomEntries() {
+  // Entries shipped in dictionary-data.js are part of the immutable site.
+  // Only this visitor's additions are user-created and therefore deletable.
+  return loadLocalEntries();
+}
+
+function entryKey(entry) {
+  return `${entry.category}\u0001${String(entry.yapo).trim().toLocaleLowerCase()}\u0001${String(entry.english).trim().toLocaleLowerCase()}`;
+}
+
+function loadLocalEdits() {
+  const edits = loadJson(EDIT_STORAGE_KEY, []);
+  return Array.isArray(edits) ? edits.filter((edit) => edit?.original && edit?.replacement) : [];
+}
+
+function storeLocalEdit(original, replacement) {
+  const edits = loadLocalEdits();
+  const originalKey = entryKey(original);
+  const index = edits.findIndex((edit) => entryKey(edit.replacement) === originalKey
+    || entryKey(edit.original) === originalKey);
+  if (index >= 0) edits[index].replacement = replacement;
+  else edits.push({ original, replacement });
+  localStorage.setItem(EDIT_STORAGE_KEY, JSON.stringify(edits));
+}
+
+function locallyEditedDictionaries() {
+  const dictionaries = structuredClone(window.YAPO_DICTIONARIES || {});
+  for (const { original, replacement } of loadLocalEdits()) {
+    const oldDictionary = dictionaries[original.category] || {};
+    const oldWord = Object.keys(oldDictionary)
+      .find((word) => word.toLocaleLowerCase() === String(original.yapo).toLocaleLowerCase());
+    if (oldWord) {
+      oldDictionary[oldWord] = oldDictionary[oldWord]
+        .filter((meaning) => meaning.toLocaleLowerCase() !== String(original.english).toLocaleLowerCase());
+      if (!oldDictionary[oldWord].length) delete oldDictionary[oldWord];
+    }
+    const replacementDictionary = dictionaries[replacement.category] || (dictionaries[replacement.category] = {});
+    const meanings = replacementDictionary[replacement.yapo] || (replacementDictionary[replacement.yapo] = []);
+    if (!meanings.some((meaning) => meaning.toLocaleLowerCase() === String(replacement.english).toLocaleLowerCase())) {
+      meanings.push(replacement.english);
+    }
   }
-  return combined;
+  return dictionaries;
 }
 
 function loadPreferences() {
@@ -130,26 +166,19 @@ function storePreference(side, source, target, category = "") {
   const preferences = loadPreferences();
   preferences[side][preferenceStorageKey(source, category)] = target;
   localStorage.setItem(PREFERENCE_STORAGE_KEY, JSON.stringify(preferences));
-  if (["http:", "https:"].includes(location.protocol)) {
-    fetch("/api/preferences", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ side, source, target, category }),
-    }).then((response) => response.json()).then((payload) => {
-      if (payload?.preferences) window.YAPO_PREFERENCES = payload.preferences;
-    }).catch(() => {});
-  }
 }
 
 if (!window.YAPO_DICTIONARIES || !window.YapoGrammar) {
   throw new Error("Translator data is missing. Run read_dic.py and reload the page.");
 }
 
-let translator = new window.YapoGrammar.GrammarTranslator(
-  window.YAPO_DICTIONARIES,
-  combinedCustomEntries(),
-  loadPreferences(),
-);
+let activeDictionaries = locallyEditedDictionaries();
+let translator = new window.YapoGrammar.GrammarTranslator(activeDictionaries, combinedCustomEntries(), loadPreferences());
+
+function rebuildLocalTranslator() {
+  activeDictionaries = locallyEditedDictionaries();
+  translator = new window.YapoGrammar.GrammarTranslator(activeDictionaries, combinedCustomEntries(), loadPreferences());
+}
 
 function areaFor(side) { return side === "yapo" ? yapoInput : englishInput; }
 function highlightLayerFor(side) { return side === "yapo" ? yapoHighlights : englishHighlights; }
@@ -861,7 +890,7 @@ function openAddDialog(forcePhrase = false) {
   sourceWord.value = currentSelection.clickedText;
   translationWord.value = "";
   wordCategory.value = forcePhrase || /\s/u.test(currentSelection.clickedText) ? "ph" : "basic";
-  saveNote.textContent = "The entry will be stored in dictionaries/custom_entries.json.";
+  saveNote.textContent = "The entry will be stored only in this browser.";
   updateAddSuggestions();
   closePopover();
   addDialog.showModal();
@@ -879,7 +908,7 @@ function openDictionaryAddDialog() {
   sourceWord.value = "";
   translationWord.value = "";
   wordCategory.value = "basic";
-  saveNote.textContent = "The entry will be stored in dictionaries/custom_entries.json.";
+  saveNote.textContent = "The entry will be stored only in this browser.";
   updateAddSuggestions();
   dictionaryDialog.close();
   addDialog.showModal();
@@ -896,7 +925,7 @@ function openDictionaryEditDialog(entry) {
   sourceWord.value = addEntryFromYapo ? entry.yapo : entry.english;
   translationWord.value = addEntryFromYapo ? entry.english : entry.yapo;
   wordCategory.value = entry.category;
-  saveNote.textContent = "Changes to generated entries are kept as a persistent override, so rebuilding from Excel will not erase them.";
+  saveNote.textContent = "This change is a private browser override; the published dictionary remains unchanged.";
   updateAddSuggestions();
   dictionaryDialog.close();
   addDialog.showModal();
@@ -963,7 +992,7 @@ function updateDictionarySuggestions() {
   const yapoQuery = yapoField.value.trim().toLocaleLowerCase();
   const englishQuery = englishField.value.trim().toLocaleLowerCase();
   const queries = [...new Set([yapoQuery, englishQuery].filter(Boolean))];
-  const entries = Object.entries(window.YAPO_DICTIONARIES || {})
+  const entries = Object.entries(activeDictionaries || {})
     .filter(([category]) => category !== "root")
     .flatMap(([category, dictionary]) => Object.entries(dictionary)
       .flatMap(([yapo, meanings]) => meanings.map((english) => ({ category, yapo, english }))));
@@ -1012,36 +1041,23 @@ async function saveTranslation(event) {
   if (!entry.yapo || !entry.english) return;
   saveNote.textContent = "Saving…";
   try {
-    let storedOnDisk = false;
-    if (["http:", "https:"].includes(location.protocol)) {
-      const response = await fetch("/api/translations", {
-        method: editingEntry ? "PUT" : "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(editingEntry ? { original: editingEntry, replacement: entry } : entry),
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok || !payload.ok) throw new Error(payload.error || `HTTP ${response.status}`);
-      if (payload.dictionaries) {
-        window.YAPO_DICTIONARIES = payload.dictionaries;
-        window.YAPO_CUSTOM_ENTRIES = payload.customEntries || [];
-        translator = new window.YapoGrammar.GrammarTranslator(
-          payload.dictionaries,
-          combinedCustomEntries(payload.customEntries || []),
-          loadPreferences(),
-        );
+    if (editingEntry) {
+      const editedLocalEntry = loadLocalEntries().some((candidate) => entryKey(candidate) === entryKey(editingEntry));
+      if (editedLocalEntry) {
+        removeLocalEntry(editingEntry);
+        storeLocalEntry(entry);
+      } else {
+        storeLocalEdit(editingEntry, entry);
       }
-      storedOnDisk = true;
-    }
-    if (!editingEntry || !storedOnDisk) {
-      if (editingEntry) removeLocalEntry(editingEntry);
-      translator.addCustom(entry);
+    } else {
       storeLocalEntry(entry);
     }
+    rebuildLocalTranslator();
     addDialog.close();
     translateSelectedDirection();
     statusText.textContent = editingEntry
       ? `Updated “${entry.yapo}” → “${entry.english}”`
-      : (storedOnDisk ? `Saved “${entry.yapo}” in the personal dictionary file` : `Saved “${entry.yapo}” in this browser`);
+      : `Saved “${entry.yapo}” in this browser`;
     editingEntry = null;
     statusDot.classList.remove("warning");
   } catch (error) {
@@ -1053,24 +1069,8 @@ async function saveTranslation(event) {
 async function deleteTranslation(entry) {
   if (!window.confirm(`Delete “${entry.yapo}” → “${entry.english}”?`)) return false;
   try {
-    if (["http:", "https:"].includes(location.protocol)) {
-      const response = await fetch("/api/translations", {
-        method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify(entry),
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok || !payload.ok) throw new Error(payload.error || `HTTP ${response.status}`);
-      window.YAPO_DICTIONARIES = payload.dictionaries;
-      window.YAPO_CUSTOM_ENTRIES = payload.customEntries;
-      removeLocalEntry(entry);
-      translator = new window.YapoGrammar.GrammarTranslator(
-        payload.dictionaries,
-        combinedCustomEntries(payload.customEntries),
-        loadPreferences(),
-      );
-    } else {
-      removeLocalEntry(entry);
-      translator.removeCustom(entry);
-    }
+    removeLocalEntry(entry);
+    rebuildLocalTranslator();
     currentSelection = null;
     closePopover();
     translateSelectedDirection();
@@ -1089,7 +1089,7 @@ function renderCustomDictionary() {
   const query = dictionarySearch.value.trim().toLocaleLowerCase();
   const entries = dictionaryMode === "custom"
     ? combinedCustomEntries()
-    : Object.entries(window.YAPO_DICTIONARIES).filter(([category]) => category !== "root").flatMap(([category, dictionary]) =>
+    : Object.entries(activeDictionaries).filter(([category]) => category !== "root").flatMap(([category, dictionary]) =>
       Object.entries(dictionary).flatMap(([yapo, meanings]) => meanings.map((english) => ({ category, yapo, english }))));
   const filteredEntries = entries.filter((entry) => !query
     || entry[dictionaryDirection].toLocaleLowerCase().includes(query));
