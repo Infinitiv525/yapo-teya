@@ -1,4 +1,5 @@
 "use strict";
+
 const CUSTOM_STORAGE_KEY = "yapo-teya-custom-translations-v1";
 const PREFERENCE_STORAGE_KEY = "yapo-teya-preferred-translations-v1";
 const EDIT_STORAGE_KEY = "yapo-teya-dictionary-edits-v1";
@@ -1031,19 +1032,14 @@ function updateAddSuggestions() {
 
 async function saveTranslation(event) {
   event.preventDefault();
-
   const fromYapo = addEntryFromYapo;
-
   const entry = {
     category: wordCategory.value,
     yapo: (fromYapo ? sourceWord.value : translationWord.value).trim(),
     english: (fromYapo ? translationWord.value : sourceWord.value).trim(),
   };
-
   if (!entry.yapo || !entry.english) return;
-
   saveNote.textContent = "Saving…";
-
   try {
     if (editingEntry) {
       const editedLocalEntry = loadLocalEntries().some((candidate) => entryKey(candidate) === entryKey(editingEntry));
@@ -1055,21 +1051,15 @@ async function saveTranslation(event) {
       }
     } else {
       storeLocalEntry(entry);
-      removeLocalDeletion(entry);
     }
     rebuildLocalTranslator();
     addDialog.close();
     translateSelectedDirection();
-
     statusText.textContent = editingEntry
       ? `Updated “${entry.yapo}” → “${entry.english}”`
       : `Saved “${entry.yapo}” in this browser`;
     editingEntry = null;
     statusDot.classList.remove("warning");
-
-    if (dictionaryDialog.open) {
-      renderCustomDictionary();
-    }
   } catch (error) {
     saveNote.textContent = `Could not save: ${error.message}`;
     statusDot.classList.add("warning");
@@ -1077,31 +1067,19 @@ async function saveTranslation(event) {
 }
 
 async function deleteTranslation(entry) {
-  if (!window.confirm(`Delete “${entry.yapo}” → “${entry.english}” from this browser?`)) {
-    return false;
-  }
-
+  if (!window.confirm(`Delete “${entry.yapo}” → “${entry.english}”?`)) return false;
   try {
     removeLocalEntry(entry);
     rebuildLocalTranslator();
     currentSelection = null;
     closePopover();
     translateSelectedDirection();
-
-    statusText.textContent =
-      `Deleted “${entry.yapo}” → “${entry.english}” from this browser`;
-
+    statusText.textContent = `Deleted “${entry.yapo}” → “${entry.english}”`;
     statusDot.classList.remove("warning");
-
-    if (dictionaryDialog.open) {
-      renderCustomDictionary();
-    }
-
+    if (dictionaryDialog.open) renderCustomDictionary();
     return true;
   } catch (error) {
-    statusText.textContent =
-      `Could not delete translation: ${error.message}`;
-
+    statusText.textContent = `Could not delete translation: ${error.message}`;
     statusDot.classList.add("warning");
     return false;
   }
@@ -1156,13 +1134,14 @@ function renderCustomDictionary() {
     editButton.title = "Edit this dictionary entry";
     editButton.addEventListener("click", () => openDictionaryEditDialog(entry));
     action.append(category, editButton);
-    const deleteButton = document.createElement("button");
-deleteButton.type = "button";
-deleteButton.className = "delete-option";
-deleteButton.textContent = "Delete";
-deleteButton.title = "Hide this entry in this browser";
-deleteButton.addEventListener("click", () => deleteTranslation(entry));
-action.append(deleteButton);
+    if (translator.isCustom(entry.category, entry.yapo, entry.english)) {
+      const deleteButton = document.createElement("button");
+      deleteButton.type = "button";
+      deleteButton.className = "delete-option";
+      deleteButton.textContent = "Delete";
+      deleteButton.addEventListener("click", () => deleteTranslation(entry));
+      action.append(deleteButton);
+    }
     row.append(source, arrow, target, action);
     customDictionaryList.append(row);
   }
