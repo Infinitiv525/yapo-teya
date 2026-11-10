@@ -3,6 +3,7 @@
 const CUSTOM_STORAGE_KEY = "yapo-teya-custom-translations-v1";
 const PREFERENCE_STORAGE_KEY = "yapo-teya-preferred-translations-v1";
 const EDIT_STORAGE_KEY = "yapo-teya-dictionary-edits-v1";
+const DELETE_STORAGE_KEY = "yapo-teya-dictionary-deletions-v1";
 const CLICK_WORD_RE = /[\p{L}\p{N}]+(?:['’\-][\p{L}\p{N}]+)*/gu;
 const CATEGORY_LABELS = {
   basic: "basic", n: "noun", adj: "adjective", v: "verb", adv: "adverb",
@@ -26,6 +27,9 @@ const wordPopover = document.querySelector("#wordPopover");
 const popoverWord = document.querySelector("#popoverWord");
 const popoverOrigin = document.querySelector("#popoverOrigin");
 const optionList = document.querySelector("#optionList");
+const unknownTypeControl = document.querySelector("#unknownTypeControl");
+const unknownTypeSelect = document.querySelector("#unknownTypeSelect");
+const unknownTypeHint = document.querySelector("#unknownTypeHint");
 const addDialog = document.querySelector("#addDialog");
 const addForm = document.querySelector("#addTranslationForm");
 const sourceWord = document.querySelector("#sourceWord");
@@ -103,49 +107,76 @@ function removeLocalEntry(entry) {
   localStorage.setItem(CUSTOM_STORAGE_KEY, JSON.stringify(entries));
 }
 
-function combinedCustomEntries() {
-  // Entries shipped in dictionary-data.js are part of the immutable site.
-  // Only this visitor's additions are user-created and therefore deletable.
-  return loadLocalEntries();
-}
-
 function entryKey(entry) {
-  return `${entry.category}\u0001${String(entry.yapo).trim().toLocaleLowerCase()}\u0001${String(entry.english).trim().toLocaleLowerCase()}`;
+  return [entry.category, entry.yapo, entry.english]
+    .map((part) => String(part || "").trim().toLocaleLowerCase()).join("\u0001");
 }
 
 function loadLocalEdits() {
   const edits = loadJson(EDIT_STORAGE_KEY, []);
-  return Array.isArray(edits) ? edits.filter((edit) => edit?.original && edit?.replacement) : [];
+  return Array.isArray(edits) ? edits.filter((e) => e?.original && e?.replacement) : [];
 }
 
-function storeLocalEdit(original, replacement) {
-  const edits = loadLocalEdits();
-  const originalKey = entryKey(original);
-  const index = edits.findIndex((edit) => entryKey(edit.replacement) === originalKey
-    || entryKey(edit.original) === originalKey);
-  if (index >= 0) edits[index].replacement = replacement;
-  else edits.push({ original, replacement });
+function loadLocalDeletions() {
+  const entries = loadJson(DELETE_STORAGE_KEY, []);
+  return Array.isArray(entries) ? entries : [];
+}
+
+function saveLocalEdits(edits) {
   localStorage.setItem(EDIT_STORAGE_KEY, JSON.stringify(edits));
+}
+
+function saveLocalDeletions(deletions) {
+  localStorage.setItem(DELETE_STORAGE_KEY, JSON.stringify(deletions));
+}
+
+function publishedEntries() {
+  return Object.entries(window.YAPO_DICTIONARIES || {})
+    .filter(([category]) => category !== "root")
+    .flatMap(([category, dictionary]) => Object.entries(dictionary)
+      .flatMap(([yapo, meanings]) => meanings.map((english) => ({ category, yapo, english }))));
+}
+
+function combinedCustomEntries() {
+  // Published custom entries are already included in dictionary-data.js.
+  // Only genuinely browser-local additions are passed as custom entries.
+  return loadLocalEntries().filter((entry) =>
+    !loadLocalDeletions().some((deleted) => entryKey(deleted) === entryKey(entry)));
 }
 
 function locallyEditedDictionaries() {
   const dictionaries = structuredClone(window.YAPO_DICTIONARIES || {});
+  const remove = (entry) => {
+    const dictionary = dictionaries[entry.category];
+    if (!dictionary) return;
+    const word = Object.keys(dictionary).find((key) => key.toLocaleLowerCase() === String(entry.yapo).toLocaleLowerCase());
+    if (!word) return;
+    dictionary[word] = dictionary[word].filter((meaning) =>
+      meaning.toLocaleLowerCase() !== String(entry.english).toLocaleLowerCase());
+    if (!dictionary[word].length) delete dictionary[word];
+  };
+  const add = (entry) => {
+    const dictionary = dictionaries[entry.category] || (dictionaries[entry.category] = {});
+    const word = Object.keys(dictionary).find((key) => key.toLocaleLowerCase() === String(entry.yapo).toLocaleLowerCase()) || entry.yapo;
+    const meanings = dictionary[word] || (dictionary[word] = []);
+    if (!meanings.some((meaning) => meaning.toLocaleLowerCase() === String(entry.english).toLocaleLowerCase())) meanings.push(entry.english);
+  };
+  const deleted = new Set(loadLocalDeletions().map(entryKey));
   for (const { original, replacement } of loadLocalEdits()) {
-    const oldDictionary = dictionaries[original.category] || {};
-    const oldWord = Object.keys(oldDictionary)
-      .find((word) => word.toLocaleLowerCase() === String(original.yapo).toLocaleLowerCase());
-    if (oldWord) {
-      oldDictionary[oldWord] = oldDictionary[oldWord]
-        .filter((meaning) => meaning.toLocaleLowerCase() !== String(original.english).toLocaleLowerCase());
-      if (!oldDictionary[oldWord].length) delete oldDictionary[oldWord];
-    }
-    const replacementDictionary = dictionaries[replacement.category] || (dictionaries[replacement.category] = {});
-    const meanings = replacementDictionary[replacement.yapo] || (replacementDictionary[replacement.yapo] = []);
-    if (!meanings.some((meaning) => meaning.toLocaleLowerCase() === String(replacement.english).toLocaleLowerCase())) {
-      meanings.push(replacement.english);
-    }
+    remove(original);
+    if (!deleted.has(entryKey(replacement))) add(replacement);
   }
+  for (const entry of loadLocalDeletions()) remove(entry);
   return dictionaries;
+}
+
+function rebuildLocalTranslator() {
+  activeDictionaries = locallyEditedDictionaries();
+  translator = new window.YapoGrammar.GrammarTranslator(activeDictionaries, combinedCustomEntries(), loadPreferences());
+  for (const side of ["yapo", "english"]) {
+    for (const phrase of splitPhrases[side]) translator.setPhraseEnabled(side, phrase, false);
+  }
+  updateCounts();
 }
 
 function loadPreferences() {
@@ -169,16 +200,11 @@ function storePreference(side, source, target, category = "") {
 }
 
 if (!window.YAPO_DICTIONARIES || !window.YapoGrammar) {
-  throw new Error("Translator data is missing. Run read_dic.py and reload the page.");
+  throw new Error("Translator data is missing. Check dictionary-data.js and grammar.js.");
 }
 
 let activeDictionaries = locallyEditedDictionaries();
 let translator = new window.YapoGrammar.GrammarTranslator(activeDictionaries, combinedCustomEntries(), loadPreferences());
-
-function rebuildLocalTranslator() {
-  activeDictionaries = locallyEditedDictionaries();
-  translator = new window.YapoGrammar.GrammarTranslator(activeDictionaries, combinedCustomEntries(), loadPreferences());
-}
 
 function areaFor(side) { return side === "yapo" ? yapoInput : englishInput; }
 function highlightLayerFor(side) { return side === "yapo" ? yapoHighlights : englishHighlights; }
@@ -244,14 +270,16 @@ function clauseNumberAt(text, position) {
 function buildSourceSegments(sourceSide, text) {
   const words = wordSpans(text);
   const segments = [];
+  const hasTranslator = typeof translator !== "undefined";
   const optionCache = new Map();
   const cachedOptions = (value) => {
     const cacheKey = value.trim().toLocaleLowerCase();
     if (!optionCache.has(cacheKey)) optionCache.set(cacheKey, optionsFor(sourceSide, value));
     return optionCache.get(cacheKey);
   };
-  const configuredMaximum = typeof translator !== "undefined"
-    ? (sourceSide === "yapo" ? translator.maximumYapoPhrase : translator.maximumEnglishPhrase)
+  const configuredMaximum = hasTranslator
+    ? (sourceSide === "yapo" ? translator.maximumYapoPhrase
+      : Math.max(translator.maximumEnglishPhrase, translator.maximumTemporaryEnglishPhrase || 1))
     : 10;
   const maximumPhraseLength = Math.max(2, Number(configuredMaximum) || 2);
   for (let index = 0; index < words.length;) {
@@ -265,14 +293,28 @@ function buildSourceSegments(sourceSide, text) {
       if (/[,.!?;:\r\n]/u.test(sourceText)) continue;
       if (splitPhrases[sourceSide].has(sourceText.trim().toLocaleLowerCase())) continue;
       const options = cachedOptions(sourceText);
-      if (options.length) {
-        selected = { sourceText, sourceStart: start, sourceEnd: end, options, wordCount: length };
+      const temporaryCategory = sourceSide === "english" && hasTranslator
+        ? translator.temporaryEnglishCategory(sourceText) : "";
+      if (options.length || temporaryCategory) {
+        selected = { sourceText, sourceStart: start, sourceEnd: end, options, wordCount: length, inferredCategory: temporaryCategory || "" };
         break;
       }
     }
     if (!selected) {
       const word = words[index];
-      selected = { sourceText: word.text, sourceStart: word.start, sourceEnd: word.end, options: cachedOptions(word.text), wordCount: 1 };
+      const options = cachedOptions(word.text);
+      const temporaryCategory = sourceSide === "english" && hasTranslator
+        ? translator.temporaryEnglishCategory(word.text) : "";
+      selected = {
+        sourceText: word.text,
+        sourceStart: word.start,
+        sourceEnd: word.end,
+        options,
+        wordCount: 1,
+        inferredCategory: temporaryCategory || (sourceSide === "english" && !options.length && hasTranslator
+          ? translator.inferEnglishCategoryAt(text, word.start)
+          : ""),
+      };
     }
     segments.push(selected);
     index += selected.wordCount;
@@ -285,6 +327,8 @@ function appendHighlightRange(fragment, text, cursor, range, alignmentIndex, isP
   const span = document.createElement("span");
   span.className = `highlight-segment${isPhrase ? " is-phrase" : ""}${isUnknown ? " is-unknown" : ""}`;
   span.dataset.alignmentIndex = String(alignmentIndex);
+  span.dataset.start = String(range.start);
+  span.dataset.end = String(range.end);
   span.textContent = text.slice(range.start, range.end);
   fragment.append(span);
   return range.end;
@@ -320,12 +364,28 @@ function renderHighlightLayer(side) {
       }
     }
   }
-  ranges.sort((left, right) => left.start - right.start || right.end - left.end);
+  // Several English grammar words can be fused into one Yapo surface word
+  // (for example "was trying" -> rayil).  Preserve all owners of an exact
+  // range so hovering that surface highlights every contributing source word.
+  const groupedRanges = new Map();
+  for (const range of ranges) {
+    const key = `${range.start}:${range.end}`;
+    const existing = groupedRanges.get(key);
+    if (!existing) {
+      groupedRanges.set(key, { ...range, alignmentIndexes: [range.alignmentIndex] });
+    } else {
+      if (!existing.alignmentIndexes.includes(range.alignmentIndex)) existing.alignmentIndexes.push(range.alignmentIndex);
+      existing.isPhrase ||= range.isPhrase;
+      existing.isUnknown &&= range.isUnknown;
+    }
+  }
+  const visibleRanges = [...groupedRanges.values()];
+  visibleRanges.sort((left, right) => left.start - right.start || right.end - left.end);
   const fragment = document.createDocumentFragment();
   let cursor = 0;
-  for (const range of ranges) {
+  for (const range of visibleRanges) {
     if (range.start < cursor) continue;
-    cursor = appendHighlightRange(fragment, text, cursor, range, range.alignmentIndex, range.isPhrase, range.isUnknown);
+    cursor = appendHighlightRange(fragment, text, cursor, range, range.alignmentIndexes.join(","), range.isPhrase, range.isUnknown);
   }
   if (cursor < text.length) fragment.append(document.createTextNode(text.slice(cursor)));
   layer.replaceChildren(fragment);
@@ -340,6 +400,139 @@ function assignTargetRanges(targetText, alignment) {
       : [];
   }
   const claimed = alignment.flatMap((item) => item.targetRanges);
+  const morphologyBase = (value) => {
+    let word = String(value || "").toLocaleLowerCase();
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const prefix of ["ney", "may", "mu", "ni"]) {
+        if (word.startsWith(prefix) && word.length > prefix.length + 1) {
+          word = word.slice(prefix.length);
+          changed = true;
+          break;
+        }
+      }
+    }
+    if (word.endsWith("ish") && word.length > 3) word = `${word.slice(0, -3)}i`;
+    else if (word.endsWith("il") && word.length > 2) word = `${word.slice(0, -2)}i`;
+    // Yapo part-of-speech forms share a root and differ only in their final
+    // vowel (kula/kule/kuli/kulo).  Generated category shifts must therefore
+    // remain connected to the English lexeme that supplied that root.
+    if (/^[\p{L}\p{M}]{3,}[oaie]$/u.test(word)) word = word.slice(0, -1);
+    return word;
+  };
+
+  // Attach individual words of a translated phrase and regular grammatical
+  // derivatives before using proximity fallbacks.  This covers reordered
+  // multiword nouns and stacked forms such as mumayluta without relying on
+  // the source and target having identical clause numbers.
+  for (const word of wordSpans(targetText)) {
+    if (claimed.some((range) => overlaps(range, word))) continue;
+    const normalized = word.text.toLocaleLowerCase();
+    const targetBase = morphologyBase(normalized);
+    const matchesComponent = (item) => {
+      if (!item.options.length) return item.sourceText.trim().toLocaleLowerCase() === normalized;
+      return item.options.some((option) => wordSpans(option.value).some((optionWord) => {
+        const optionNormalized = optionWord.text.toLocaleLowerCase();
+        return optionNormalized === normalized || morphologyBase(optionNormalized) === targetBase;
+      }));
+    };
+    let candidates = alignment.filter((item) => {
+      if (lineNumberAt(targetText, word.start) !== item.sourceLine
+        || sentenceNumberAt(targetText, word.start) !== item.sourceSentence) return false;
+      return matchesComponent(item);
+    });
+    // Sentence counters can differ when one side contains punctuation inside
+    // a contraction or an imported phrase.  Relax only to a unique match on
+    // the same physical line; this cannot recreate the old stop/top bug.
+    if (!candidates.length) {
+      const sameLine = alignment.filter((item) => item.sourceLine === lineNumberAt(targetText, word.start)
+        && matchesComponent(item));
+      const notYetRepresented = sameLine.filter((item) => !item.targetRanges.length);
+      if (notYetRepresented.length === 1) candidates = notYetRepresented;
+      else if (sameLine.length === 1) candidates = sameLine;
+      else if (notYetRepresented.length > 1) {
+        const sourceLength = Math.max(1, ...alignment.map((item) => item.sourceEnd));
+        candidates = [notYetRepresented.sort((left, right) =>
+          Math.abs((left.sourceStart / sourceLength) * targetText.length - word.start)
+          - Math.abs((right.sourceStart / sourceLength) * targetText.length - word.start))[0]];
+      } else if (!sameLine.length) {
+        const sourceLength = Math.max(1, ...alignment.map((item) => item.sourceEnd));
+        const globalMatches = alignment.filter((item) => !item.targetRanges.length && matchesComponent(item));
+        if (globalMatches.length) candidates = [globalMatches.sort((left, right) =>
+          Math.abs((left.sourceStart / sourceLength) * targetText.length - word.start)
+          - Math.abs((right.sourceStart / sourceLength) * targetText.length - word.start))[0]];
+      }
+    }
+    candidates.sort((left, right) => {
+      // Prefer a range already anchored in the generated text.  Falling back
+      // to sourceStart is deterministic, but must not read the live textarea:
+      // this pure pass is also used by tests and during a direction switch.
+      const leftAnchor = Number.isInteger(left.targetStart) ? left.targetStart : left.sourceStart;
+      const rightAnchor = Number.isInteger(right.targetStart) ? right.targetStart : right.sourceStart;
+      return Math.abs(leftAnchor - word.start) - Math.abs(rightAnchor - word.start);
+    });
+    if (!candidates.length) continue;
+    const owner = candidates[0];
+    owner.targetRanges.push({ start: word.start, end: word.end });
+    if (!Number.isInteger(owner.targetStart)) {
+      owner.targetStart = word.start;
+      owner.targetEnd = word.end;
+    }
+    claimed.push({ start: word.start, end: word.end });
+  }
+  const refreshBounds = () => {
+    for (const item of alignment) {
+      if (!item.targetRanges.length) continue;
+      item.targetStart = Math.min(...item.targetRanges.map((range) => range.start));
+      item.targetEnd = Math.max(...item.targetRanges.map((range) => range.end));
+    }
+  };
+  refreshBounds();
+  // Some English grammar words are realized as an affix on the following
+  // Yapo word. They deliberately share its range: hovering "not" or "will"
+  // should explain the same derived form as hovering the lexical verb.
+  if (direction === "english") {
+    const fusedGrammar = new Set([
+      "not", "will", "did", "does", "do",
+      "have", "has", "had", "am", "is", "are", "was", "were", "been",
+    ]);
+    for (let index = 0; index < alignment.length; index += 1) {
+      const item = alignment[index];
+      const normalized = item.sourceText.trim().toLocaleLowerCase().replaceAll("’", "'");
+      const contractionOrGrammar = item.options.some((option) => option.category === "grammar")
+        || /^(?:don't|doesn't|didn't|won't|can't|couldn't|shouldn't|wouldn't|i'm|you're|he's|she's|it's|we're|they're|i've|you've|we've|they've|i'll|you'll|he'll|she'll|we'll|they'll)$/u.test(normalized);
+      if (item.targetRanges.length || (!fusedGrammar.has(normalized) && !contractionOrGrammar)) continue;
+      const sameClause = (candidate) => candidate.sourceSentence === item.sourceSentence
+        && candidate.sourceClause === item.sourceClause && candidate.targetRanges.length;
+      const verbHost = (candidate) => sameClause(candidate)
+        && candidate.options.some((option) => option.category === "v");
+      const neighbor = alignment.slice(index + 1).find(verbHost)
+        || [...alignment.slice(0, index)].reverse().find(verbHost)
+        || alignment.slice(index + 1).find(sameClause)
+        || [...alignment.slice(0, index)].reverse().find(sameClause);
+      if (!neighbor) continue;
+      item.targetStart = neighbor.targetStart;
+      item.targetEnd = neighbor.targetEnd;
+      item.targetRanges = neighbor.targetRanges.map((range) => ({ ...range }));
+    }
+
+    // The overt English subject in a negative second-person imperative is
+    // absorbed by Yapo's imperative construction.  Link it to the same verb
+    // instead of leaving it detached or attaching it to an unrelated `tu`.
+    for (let index = 1; index < alignment.length - 1; index += 1) {
+      const item = alignment[index];
+      if (item.targetRanges.length || item.sourceText.trim().toLocaleLowerCase() !== "you") continue;
+      const previous = alignment[index - 1];
+      const nextVerb = alignment.slice(index + 1).find((candidate) => candidate.sourceSentence === item.sourceSentence
+        && candidate.sourceClause === item.sourceClause && candidate.targetRanges.length
+        && candidate.options.some((option) => option.category === "v"));
+      if (!/^(?:don't|do not)$/iu.test(previous?.sourceText.trim() || "") || !nextVerb) continue;
+      item.targetStart = nextVerb.targetStart;
+      item.targetEnd = nextVerb.targetEnd;
+      item.targetRanges = nextVerb.targetRanges.map((range) => ({ ...range }));
+    }
+  }
   for (const word of wordSpans(targetText)) {
     if (claimed.some((range) => overlaps(range, word))) continue;
     const isArticle = /^(?:a|an|the)$/iu.test(word.text);
@@ -356,20 +549,23 @@ function assignTargetRanges(targetText, alignment) {
       claimed.push({ start: word.start, end: word.end });
     }
   }
-  const grammaticalMarkers = new Set(["e", "a", "tish", "li", "la", "pen", "to", "te", "ki", "of"]);
+  refreshBounds();
+  const grammaticalMarkers = new Set(["e", "a", "tish", "li", "la", "pen", "to", "te", "che", "ki", "kiya", "kiye", "of"]);
   for (const word of wordSpans(targetText)) {
     if (claimed.some((range) => overlaps(range, word)) || !grammaticalMarkers.has(word.text.toLocaleLowerCase())) continue;
-    const next = alignment
-      .filter((item) => Number.isInteger(item.targetStart) && item.targetStart >= word.end
-        && sentenceNumberAt(targetText, item.targetStart) === sentenceNumberAt(targetText, word.start)
-        && /^\s*$/u.test(targetText.slice(word.end, item.targetStart)))
-      .sort((left, right) => left.targetStart - right.targetStart)[0];
-    const previous = [...alignment]
-      .filter((item) => Number.isInteger(item.targetEnd) && item.targetEnd <= word.start
-        && sentenceNumberAt(targetText, item.targetStart) === sentenceNumberAt(targetText, word.start)
-        && /^\s*$/u.test(targetText.slice(item.targetEnd, word.start)))
-      .sort((left, right) => right.targetEnd - left.targetEnd)[0];
-    const owner = ["la"].includes(word.text.toLocaleLowerCase()) ? previous : (next || previous);
+    const anchors = alignment.flatMap((item) => item.targetRanges.map((range) => ({ item, range })))
+      .filter(({ range }) => sentenceNumberAt(targetText, range.start) === sentenceNumberAt(targetText, word.start));
+    const next = anchors
+      .filter(({ range }) => range.start >= word.end && /^\s*$/u.test(targetText.slice(word.end, range.start)))
+      .sort((left, right) => left.range.start - right.range.start)[0]?.item;
+    const previous = anchors
+      .filter(({ range }) => range.end <= word.start && /^\s*$/u.test(targetText.slice(range.end, word.start)))
+      .sort((left, right) => right.range.end - left.range.end)[0]?.item;
+    let owner = ["la"].includes(word.text.toLocaleLowerCase()) ? previous : (next || previous);
+    if (word.text.toLocaleLowerCase() === "la" && /,\s*$/u.test(targetText.slice(0, word.start))) {
+      owner = [...alignment].reverse().find((item) => item.sourceSentence === sentenceNumberAt(targetText, word.start)
+        && item.sourceText.trim().toLocaleLowerCase() === "if") || owner;
+    }
     if (owner) {
       owner.targetRanges.push({ start: word.start, end: word.end });
       claimed.push({ start: word.start, end: word.end });
@@ -398,6 +594,73 @@ function assignTargetRanges(targetText, alignment) {
       claimed.push({ start: word.start, end: word.end });
     }
   }
+  refreshBounds();
+
+  // A few surface words are created by a construction rather than copied
+  // from one dictionary option.  Give them an explicit origin so they remain
+  // selectable and never appear as unexplained red output.
+  for (const word of wordSpans(targetText)) {
+    if (claimed.some((range) => overlaps(range, word))) continue;
+    const normalized = word.text.toLocaleLowerCase();
+    let owners = [];
+    if (direction === "english" && normalized === "su") {
+      owners = alignment.filter((item) => item.sourceSentence === sentenceNumberAt(targetText, word.start)
+        && item.sourceText.trim().toLocaleLowerCase() === "please");
+    } else if (direction === "english" && normalized === "yene") {
+      owners = alignment.filter((item, index) => item.sourceSentence === sentenceNumberAt(targetText, word.start)
+        && ["nothing", "but"].includes(item.sourceText.trim().toLocaleLowerCase())
+        && alignment.some((candidate, candidateIndex) => Math.abs(candidateIndex - index) === 1
+          && ["nothing", "but"].includes(candidate.sourceText.trim().toLocaleLowerCase())));
+    } else if (direction === "yapo") {
+      const sourceForms = ({
+        what: ["kiyo", "kiya"], who: ["kiyo"], how: ["kiye"],
+        where: ["loko", "kiya"], when: ["tempo", "kiya"], why: ["pen", "kiyo"],
+      })[normalized] || [];
+      owners = alignment.filter((item) => item.sourceSentence === sentenceNumberAt(targetText, word.start)
+        && sourceForms.includes(item.sourceText.trim().toLocaleLowerCase()));
+      if (!owners.length && ["do", "does", "did", "will", "can", "am", "is", "are", "was", "were"].includes(normalized)) {
+        owners = alignment.filter((item) => item.sourceSentence === sentenceNumberAt(targetText, word.start)
+          && item.options.some((option) => option.category === "v"));
+      }
+    }
+    if (!owners.length) continue;
+    if (owners.length > 1) {
+      const sourceLength = Math.max(1, ...alignment.map((item) => item.sourceEnd));
+      owners = [owners.sort((left, right) =>
+        Math.abs((left.sourceStart / sourceLength) * targetText.length - word.start)
+        - Math.abs((right.sourceStart / sourceLength) * targetText.length - word.start))[0]];
+    }
+    const range = { start: word.start, end: word.end };
+    for (const owner of owners) owner.targetRanges.push({ ...range });
+    claimed.push(range);
+  }
+  refreshBounds();
+
+  // Final semantic reverse lookup for a generated part-of-speech surface.
+  // It is deliberately based on an exact dictionary meaning, never on a
+  // substring or mere proximity.
+  for (const word of wordSpans(targetText)) {
+    if (alignment.some((item) => item.targetRanges.some((range) => overlaps(range, word)))) continue;
+    const targetSide = direction === "english" ? "yapo" : "english";
+    const targetBase = morphologyBase(word.text);
+    const reverseOptions = [...optionsFor(targetSide, word.text)];
+    if (targetSide === "yapo" && targetBase) {
+      for (const ending of ["o", "a", "i", "e"]) reverseOptions.push(...optionsFor("yapo", `${targetBase}${ending}`));
+    }
+    const reverseValues = new Set(reverseOptions.map((option) => option.value.trim().toLocaleLowerCase()));
+    const candidates = alignment.filter((item) => reverseValues.has(item.sourceText.trim().toLocaleLowerCase())
+      || (!item.targetRanges.length && item.options.some((option) => wordSpans(option.value)
+        .some((optionWord) => morphologyBase(optionWord.text) === targetBase))));
+    if (!candidates.length) continue;
+    const sourceLength = Math.max(1, ...alignment.map((item) => item.sourceEnd));
+    const owner = candidates.sort((left, right) =>
+      Math.abs((left.sourceStart / sourceLength) * targetText.length - word.start)
+      - Math.abs((right.sourceStart / sourceLength) * targetText.length - word.start))[0];
+    const range = { start: word.start, end: word.end };
+    owner.targetRanges.push(range);
+    claimed.push(range);
+  }
+  refreshBounds();
 }
 
 function renderHighlights() {
@@ -453,6 +716,26 @@ function buildAlignment(sourceSide, sourceText, targetText, respectOverrides = t
           variants.push({ option: { ...option, value }, optionRank: optionRank + 0.25 });
         }
       }
+      if (sourceSide === "english" && ["v", "adj", "adv"].includes(option.category)) {
+        const prefixes = new Set();
+        for (let cursor = segmentIndex - 1; cursor >= 0; cursor -= 1) {
+          const previous = segments[cursor];
+          if (previous.sourceSentence !== undefined && previous.sourceSentence !== sourceSentence) break;
+          if (/[^\s]/u.test(sourceText.slice(previous.sourceEnd, segments[cursor + 1]?.sourceStart ?? segment.sourceStart))) break;
+          const modifier = previous.sourceText.trim().toLocaleLowerCase();
+          if (modifier === "not") prefixes.add("ni");
+          else if (["very", "so", "too"].includes(modifier)) prefixes.add("mu");
+          else if (modifier === "more") prefixes.add("may");
+          else if (modifier === "most") prefixes.add("ney");
+          else break;
+        }
+        if (prefixes.size) {
+          const degree = prefixes.has("ney") ? "ney" : prefixes.has("may") ? "may" : "";
+          const prefix = `${prefixes.has("ni") ? "ni" : ""}${prefixes.has("mu") ? "mu" : ""}${degree}`;
+          const value = option.value.replace(/^[\p{L}\p{M}]+/u, (word) => `${prefix}${word}`);
+          variants.push({ option: { ...option, value }, optionRank: optionRank + 0.1 });
+        }
+      }
       return variants;
     });
     for (const { optionRank, option } of alignmentOptions) {
@@ -461,28 +744,34 @@ function buildAlignment(sourceSide, sourceText, targetText, respectOverrides = t
         lineNumberAt(targetText, candidate.start) === sourceLine
         && lineNumberAt(targetText, candidate.end - 1) === sourceLine
         && sentenceNumberAt(targetText, candidate.start) === sourceSentence
-        && sentenceNumberAt(targetText, candidate.end - 1) === sourceSentence
-        && clauseNumberAt(targetText, candidate.start) === sourceClause
-        && clauseNumberAt(targetText, candidate.end - 1) === sourceClause)) {
+        && sentenceNumberAt(targetText, candidate.end - 1) === sourceSentence)) {
         if (!usedTargets.some((used) => overlaps(used, range))) candidates.push({
           ...range,
           value: option.value,
           optionRank: option.value === occurrenceChoice ? -1 : optionRank,
+          clauseDistance: Math.abs(clauseNumberAt(targetText, range.start) - sourceClause),
         });
       }
     }
     candidates.sort((left, right) => Math.abs(left.start - expectedPosition) - Math.abs(right.start - expectedPosition)
-      || left.optionRank - right.optionRank);
+      || left.optionRank - right.optionRank || left.clauseDistance - right.clauseDistance);
     target = candidates[0] || null;
     if (!target && !segment.options.length) {
       target = cachedTargetRanges(segment.sourceText)
         .find((range) => !usedTargets.some((used) => overlaps(used, range))
           && lineNumberAt(targetText, range.start) === sourceLine
-          && sentenceNumberAt(targetText, range.start) === sourceSentence
-          && clauseNumberAt(targetText, range.start) === sourceClause) || null;
+          && sentenceNumberAt(targetText, range.start) === sourceSentence) || null;
     }
     if (target) usedTargets.push(target);
-    return { ...segment, targetStart: target?.start, targetEnd: target?.end, targetText: target?.value };
+    return {
+      ...segment,
+      sourceLine,
+      sourceSentence,
+      sourceClause,
+      targetStart: target?.start,
+      targetEnd: target?.end,
+      targetText: target?.value,
+    };
   });
   aligned.forEach((item, index) => {
     if (Number.isInteger(item.targetStart)) return;
@@ -598,6 +887,7 @@ function clearTranslator() {
   englishInput.value = "";
   occurrenceOverrides = new Map();
   lastAlignment = [];
+  translator.clearTemporaryEnglishCategories();
   closePopover();
   renderHighlights();
   updateCounts();
@@ -645,10 +935,19 @@ function clearHighlightClass(className) {
   document.querySelectorAll(`.highlight-segment.${className}`).forEach((span) => span.classList.remove(className));
 }
 
+function alignmentIndexesForSpan(span) {
+  return String(span?.dataset.alignmentIndex || "")
+    .split(",")
+    .map(Number)
+    .filter(Number.isInteger);
+}
+
 function applyAlignmentHighlight(alignmentIndex, className) {
   clearHighlightClass(className);
-  document.querySelectorAll(`.highlight-segment[data-alignment-index="${alignmentIndex}"]`)
-    .forEach((span) => span.classList.add(className));
+  const requested = new Set(Array.isArray(alignmentIndex) ? alignmentIndex : [alignmentIndex]);
+  document.querySelectorAll(".highlight-segment[data-alignment-index]").forEach((span) => {
+    if (alignmentIndexesForSpan(span).some((index) => requested.has(index))) span.classList.add(className);
+  });
 }
 
 function spanAtPoint(layer, clientX, clientY) {
@@ -662,12 +961,13 @@ function spanAtPoint(layer, clientX, clientY) {
 
 function handleHover(event, side) {
   const span = spanAtPoint(highlightLayerFor(side), event.clientX, event.clientY);
-  const alignmentIndex = span ? Number(span.dataset.alignmentIndex) : null;
-  if (alignmentIndex === hoveredAlignmentIndex) return;
-  hoveredAlignmentIndex = alignmentIndex;
+  const alignmentIndexes = alignmentIndexesForSpan(span);
+  const hoverKey = alignmentIndexes.join(",");
+  if (hoverKey === hoveredAlignmentIndex) return;
+  hoveredAlignmentIndex = hoverKey;
   clearHighlightClass("is-hovered");
-  if (!Number.isInteger(alignmentIndex)) return;
-  applyAlignmentHighlight(alignmentIndex, "is-hovered");
+  if (!alignmentIndexes.length) return;
+  applyAlignmentHighlight(alignmentIndexes, "is-hovered");
 }
 
 function stopHover() {
@@ -683,10 +983,19 @@ function showContextMenu(event, side) {
     return;
   }
   const span = spanAtPoint(highlightLayerFor(side), event.clientX, event.clientY);
-  const alignmentIndex = span ? Number(span.dataset.alignmentIndex) : null;
-  const item = Number.isInteger(alignmentIndex) ? lastAlignment[alignmentIndex] : null;
+  const alignmentIndexes = alignmentIndexesForSpan(span);
+  const candidates = alignmentIndexes.map((index) => lastAlignment[index]).filter(Boolean);
+  const item = side === direction
+    ? candidates[0]
+    : (candidates.find((candidate) => candidate.options.some((option) => !["grammar", "marker"].includes(option.category))) || candidates[0]);
   if (item) showAlignmentOptions(event, side, item);
-  else closePopover();
+  else if (span) {
+    const start = Number(span.dataset.start);
+    const end = Number(span.dataset.end);
+    populateTranslationOptions(event, side, {
+      text: areaFor(side).value.slice(start, end), start, end,
+    });
+  } else closePopover();
 }
 
 function alignedItemFor(side, selection) {
@@ -749,11 +1058,22 @@ function populateTranslationOptions(event, side, selection, forcedItem = null) {
     }
   }
   optionList.replaceChildren();
+  unknownTypeControl.hidden = true;
   if (!options.length) {
     const empty = document.createElement("div");
     empty.className = "empty-options";
     empty.textContent = "No saved translations yet.";
     optionList.append(empty);
+    if (sourceSide === "english" && direction === "english") {
+      const temporaryCategory = translator.temporaryEnglishCategory(sourceText);
+      const inferredCategory = item?.inferredCategory
+        || translator.inferEnglishCategoryAt(areaFor(sourceSide).value, item?.sourceStart ?? selection.start);
+      unknownTypeSelect.value = temporaryCategory;
+      unknownTypeHint.textContent = temporaryCategory
+        ? `Using ${CATEGORY_LABELS[temporaryCategory] || temporaryCategory} for this text. The expression stays unknown and is not saved.`
+        : `Detected as ${CATEGORY_LABELS[inferredCategory] || inferredCategory}. Change it here without adding a translation.`;
+      unknownTypeControl.hidden = false;
+    }
   } else {
     const occurrenceKeyValue = item ? occurrenceKey(item) : null;
     const hasOccurrenceChoice = occurrenceKeyValue ? occurrenceOverrides.has(occurrenceKeyValue) : false;
@@ -857,6 +1177,19 @@ function restoreCurrentPhrase() {
 
 function closePopover() { wordPopover.hidden = true; }
 
+function setTemporaryUnknownType() {
+  if (!currentSelection || currentSelection.sourceSide !== "english") return;
+  const expression = currentSelection.sourceText.trim();
+  if (!expression) return;
+  translator.setTemporaryEnglishCategory(expression, unknownTypeSelect.value);
+  const selectedCategory = unknownTypeSelect.value;
+  translateSelectedDirection();
+  statusText.textContent = selectedCategory
+    ? `Temporary type for “${expression}”: ${CATEGORY_LABELS[selectedCategory] || selectedCategory}`
+    : `“${expression}” returned to automatic word-type detection`;
+  statusDot.classList.add("warning");
+}
+
 function useForOccurrence(value) {
   const item = currentSelection?.alignmentItem;
   if (!item || currentSelection.sourceSide !== direction) return;
@@ -925,7 +1258,7 @@ function openDictionaryEditDialog(entry) {
   sourceWord.value = addEntryFromYapo ? entry.yapo : entry.english;
   translationWord.value = addEntryFromYapo ? entry.english : entry.yapo;
   wordCategory.value = entry.category;
-  saveNote.textContent = "This change is a private browser override; the published dictionary remains unchanged.";
+  saveNote.textContent = "This edit is saved only in this browser. The published dictionary stays unchanged.";
   updateAddSuggestions();
   dictionaryDialog.close();
   addDialog.showModal();
@@ -1032,34 +1365,37 @@ function updateAddSuggestions() {
 
 async function saveTranslation(event) {
   event.preventDefault();
-  const fromYapo = addEntryFromYapo;
   const entry = {
     category: wordCategory.value,
-    yapo: (fromYapo ? sourceWord.value : translationWord.value).trim(),
-    english: (fromYapo ? translationWord.value : sourceWord.value).trim(),
+    yapo: (addEntryFromYapo ? sourceWord.value : translationWord.value).trim(),
+    english: (addEntryFromYapo ? translationWord.value : sourceWord.value).trim(),
   };
   if (!entry.yapo || !entry.english) return;
-  saveNote.textContent = "Saving…";
   try {
     if (editingEntry) {
-      const editedLocalEntry = loadLocalEntries().some((candidate) => entryKey(candidate) === entryKey(editingEntry));
-      if (editedLocalEntry) {
+      const oldKey = entryKey(editingEntry);
+      const local = loadLocalEntries().some((item) => entryKey(item) === oldKey);
+      if (local) {
         removeLocalEntry(editingEntry);
         storeLocalEntry(entry);
       } else {
-        storeLocalEdit(editingEntry, entry);
+        const edits = loadLocalEdits();
+        const index = edits.findIndex((item) => entryKey(item.original) === oldKey || entryKey(item.replacement) === oldKey);
+        if (index >= 0) edits[index].replacement = entry;
+        else edits.push({ original: editingEntry, replacement: entry });
+        saveLocalEdits(edits);
       }
     } else {
       storeLocalEntry(entry);
     }
+    saveLocalDeletions(loadLocalDeletions().filter((item) => entryKey(item) !== entryKey(entry)));
     rebuildLocalTranslator();
     addDialog.close();
     translateSelectedDirection();
-    statusText.textContent = editingEntry
-      ? `Updated “${entry.yapo}” → “${entry.english}”`
-      : `Saved “${entry.yapo}” in this browser`;
+    statusText.textContent = `${editingEntry ? "Updated" : "Saved"} “${entry.yapo}” in this browser`;
     editingEntry = null;
     statusDot.classList.remove("warning");
+    if (dictionaryDialog.open) renderCustomDictionary();
   } catch (error) {
     saveNote.textContent = `Could not save: ${error.message}`;
     statusDot.classList.add("warning");
@@ -1067,19 +1403,33 @@ async function saveTranslation(event) {
 }
 
 async function deleteTranslation(entry) {
-  if (!window.confirm(`Delete “${entry.yapo}” → “${entry.english}”?`)) return false;
+  if (!window.confirm(`Hide “${entry.yapo}” → “${entry.english}” in this browser?`)) return false;
   try {
-    removeLocalEntry(entry);
+    const key = entryKey(entry);
+    const local = loadLocalEntries().some((item) => entryKey(item) === key);
+    if (local) removeLocalEntry(entry);
+    const edits = loadLocalEdits();
+    const edited = edits.find((item) => entryKey(item.replacement) === key);
+    if (edited) {
+      saveLocalEdits(edits.filter((item) => item !== edited));
+      const deletions = loadLocalDeletions();
+      if (!deletions.some((item) => entryKey(item) === entryKey(edited.original))) deletions.push(edited.original);
+      saveLocalDeletions(deletions);
+    } else if (!local) {
+      const deletions = loadLocalDeletions();
+      if (!deletions.some((item) => entryKey(item) === key)) deletions.push(entry);
+      saveLocalDeletions(deletions);
+    }
     rebuildLocalTranslator();
     currentSelection = null;
     closePopover();
     translateSelectedDirection();
-    statusText.textContent = `Deleted “${entry.yapo}” → “${entry.english}”`;
+    statusText.textContent = `Hidden “${entry.yapo}” → “${entry.english}” in this browser`;
     statusDot.classList.remove("warning");
     if (dictionaryDialog.open) renderCustomDictionary();
     return true;
   } catch (error) {
-    statusText.textContent = `Could not delete translation: ${error.message}`;
+    statusText.textContent = `Could not remove translation: ${error.message}`;
     statusDot.classList.add("warning");
     return false;
   }
@@ -1088,7 +1438,7 @@ async function deleteTranslation(entry) {
 function renderCustomDictionary() {
   const query = dictionarySearch.value.trim().toLocaleLowerCase();
   const entries = dictionaryMode === "custom"
-    ? combinedCustomEntries()
+    ? [...combinedCustomEntries(), ...loadLocalEdits().map((item) => item.replacement)]
     : Object.entries(activeDictionaries).filter(([category]) => category !== "root").flatMap(([category, dictionary]) =>
       Object.entries(dictionary).flatMap(([yapo, meanings]) => meanings.map((english) => ({ category, yapo, english }))));
   const filteredEntries = entries.filter((entry) => !query
@@ -1134,7 +1484,7 @@ function renderCustomDictionary() {
     editButton.title = "Edit this dictionary entry";
     editButton.addEventListener("click", () => openDictionaryEditDialog(entry));
     action.append(category, editButton);
-    if (translator.isCustom(entry.category, entry.yapo, entry.english)) {
+    if (true) {
       const deleteButton = document.createElement("button");
       deleteButton.type = "button";
       deleteButton.className = "delete-option";
@@ -1254,6 +1604,7 @@ document.querySelector("#translateButton").addEventListener("click", translateSe
 document.querySelector("#clearButton").addEventListener("click", clearTranslator);
 document.querySelector("#closePopover").addEventListener("click", closePopover);
 document.querySelector("#addTranslationButton").addEventListener("click", () => openAddDialog(false));
+unknownTypeSelect.addEventListener("change", setTemporaryUnknownType);
 document.querySelector("#dictionaryButton").addEventListener("click", openDictionary);
 document.querySelector("#dictionaryAddButton").addEventListener("click", openDictionaryAddDialog);
 document.querySelector("#closeDictionary").addEventListener("click", () => dictionaryDialog.close());

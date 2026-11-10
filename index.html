@@ -105,6 +105,21 @@
       <button class="icon-button" id="closePopover" type="button" aria-label="Close">×</button>
     </div>
     <div class="option-list" id="optionList"></div>
+    <div class="unknown-type-control" id="unknownTypeControl" hidden>
+      <label for="unknownTypeSelect">Temporary word type</label>
+      <select id="unknownTypeSelect">
+        <option value="">Automatic detection</option>
+        <option value="basic">Basic / grammar word</option>
+        <option value="n">Noun</option>
+        <option value="adj">Adjective</option>
+        <option value="v">Verb</option>
+        <option value="adv">Adverb</option>
+        <option value="pn">Pronoun</option>
+        <option value="num">Numeral</option>
+        <option value="prep">Preposition</option>
+      </select>
+      <small id="unknownTypeHint"></small>
+    </div>
     <button class="phrase-option" id="phraseActionButton" type="button" hidden></button>
     <button class="add-option" id="addTranslationButton" type="button"><span>＋</span> Add translation</button>
   </div>
@@ -195,8 +210,8 @@
     <div class="custom-dictionary-list" id="customDictionaryList"></div>
   </dialog>
 
-  <script src="dictionary-data.js?v=20260930-1"></script>
-  <script src="grammar.js?v=20260930-1"></script>
-  <script src="app.js?v=20260930-1"></script>
+  <script src="dictionary-data.js?v=20261110-1"></script>
+  <script src="grammar.js?v=20261110-1"></script>
+  <script src="app.js?v=20261110-1"></script>
 </body>
 </html>
